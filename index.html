@@ -1,0 +1,1166 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<!-- 아이패드에서 확대/축소 막고 화면 꽉 차게 -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>퐁퐁이 게임</title>
+<link rel="icon" href="data:,">   <!-- favicon 404 방지용 빈 아이콘 -->
+<style>
+  /* ===== 전체 화면 꾸미기 ===== */
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    /* 위는 밝은 하늘색, 아래는 연한 하늘색 (하늘 느낌) */
+    background: linear-gradient(#8fd3ff, #d7f0ff);
+    font-family: "Comic Sans MS", "맑은 고딕", sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    /* 터치할 때 글자 선택/하이라이트/더블탭 확대 막기 */
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    touch-action: manipulation;
+    overflow: hidden;
+  }
+
+  h1 {
+    color: #ff5fa2;
+    text-shadow: 2px 2px 0 #fff;
+    margin: 6px;
+    font-size: clamp(18px, 4vw, 32px);
+  }
+
+  /* ===== 게임 화면(캔버스) ===== */
+  /* 화면 크기에 맞춰 비율 유지하며 줄어들게 (아이패드 세로/가로 모두 OK) */
+  canvas {
+    background: linear-gradient(#aee4ff, #e8f8ff);
+    border: 6px solid #ff9ac9;
+    border-radius: 20px;
+    box-shadow: 0 8px 20px rgba(0,0,0,0.2);
+    max-width: 96vw;
+    max-height: 78vh;
+    width: auto;
+    height: auto;
+    touch-action: none; /* 게임 화면에서 스크롤/확대 완전 차단 */
+  }
+
+  p.hint {
+    color: #5a5a5a;
+    margin: 8px;
+    text-align: center;
+    font-size: clamp(11px, 2.5vw, 15px);
+    padding: 0 10px;
+  }
+</style>
+</head>
+<body>
+
+  <h1>🩷 퐁퐁이 게임 🩷</h1>
+  <canvas id="game" width="800" height="600"></canvas>
+  <p class="hint">← → 이동, 스페이스바 점프! 별 3개를 모아 사람에게 가면 다음 단계로! 총 10단계 🌟 (오른쪽 🔊로 소리 켬/끔)</p>
+
+<script>
+  // ===== 게임 화면 준비 =====
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+
+  // ===== 소리 엔진 (파일 없이 코드로 소리를 만든다) =====
+  let audioCtx = null;
+  let soundOn = true; // 소리 켬/끔
+
+  // 브라우저 정책상 사용자가 키를 처음 누를 때 소리 준비를 켠다
+  function ensureAudio() {
+    if (!audioCtx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) audioCtx = new AC();
+    }
+    if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+  }
+
+  // 삐- 하는 소리 한 번 내기 (주파수, 길이, 음색, 볼륨)
+  function beep(freq, dur, type = "sine", vol = 0.2) {
+    if (!soundOn || !audioCtx) return;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + dur);
+  }
+
+  // 여러 음을 차례로 연주 (딩동댕 같은 멜로디)
+  function playMelody(notes) {
+    if (!soundOn || !audioCtx) return;
+    let t = 0;
+    for (const [freq, dur] of notes) {
+      setTimeout(() => beep(freq, dur, "triangle", 0.25), t * 1000);
+      t += dur;
+    }
+  }
+
+  // 퐁퐁이가 말하기 (브라우저 내장 목소리로 "감사합니다!")
+  // 아이 목소리처럼 아주 높고 조금 빠르게
+  function speak(text) {
+    if (!soundOn) return;
+    if (!("speechSynthesis" in window)) return;
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "ko-KR";
+    u.pitch = 2.0;   // 최대한 높은 목소리 (아기처럼 귀엽게)
+    u.rate = 0.8;    // 천천히 (또박또박 아기 말투)
+    u.volume = 1.0;
+    // 한국어 여성/기본 목소리가 있으면 골라서 더 귀엽게
+    const voices = window.speechSynthesis.getVoices();
+    const koVoice = voices.find(v => /ko/i.test(v.lang) && /female|여성|유나|heami|SunHi/i.test(v.name))
+                 || voices.find(v => /ko/i.test(v.lang));
+    if (koVoice) u.voice = koVoice;
+    window.speechSynthesis.cancel(); // 이전 말 끊고
+    window.speechSynthesis.speak(u);
+  }
+
+  // 게임 소리들
+  const sfx = {
+    jump:  () => beep(520, 0.15, "square", 0.15),                 // 뿅
+    star:  () => { beep(880, 0.1, "sine", 0.2); setTimeout(() => beep(1320, 0.12, "sine", 0.2), 80); }, // 반짝
+    key:   () => playMelody([[660, 0.12], [880, 0.12], [1100, 0.18]]),  // 열쇠 상승음
+    clear: () => playMelody([[523, 0.15], [659, 0.15], [784, 0.15], [1047, 0.3]]), // 딩동댕(도미솔도)
+    fall:  () => { beep(300, 0.2, "sawtooth", 0.15); setTimeout(() => beep(180, 0.25, "sawtooth", 0.15), 120); }, // 삐용
+    win:   () => playMelody([[523,0.15],[659,0.15],[784,0.15],[1047,0.2],[784,0.15],[1047,0.35]]), // 최종 팡파레
+  };
+
+  // ===== 반짝이 파티클 =====
+  const particles = [];
+  // 어떤 위치에서 반짝이 여러 개 튀기기
+  function spawnParticles(x, y, count, colors) {
+    for (let i = 0; i < count; i++) {
+      const angle = (Math.PI * 2 * i) / count + Math.random() * 0.5;
+      const speed = 2 + Math.random() * 3;
+      particles.push({
+        x, y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed - 2,
+        life: 1,
+        color: colors[Math.floor(Math.random() * colors.length)],
+        size: 4 + Math.random() * 4,
+      });
+    }
+  }
+  // 파티클 움직이고 그리기
+  function updateAndDrawParticles() {
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.15;      // 살짝 중력
+      p.life -= 0.02;
+      if (p.life <= 0) { particles.splice(i, 1); continue; }
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, p.life);
+      drawStar(p.x, p.y, p.size, p.color);
+      ctx.restore();
+    }
+  }
+
+  // ===== 퐁퐁이 (주인공) =====
+  // 커비 같은 둥근 핑크 캐릭터
+  const pongpong = {
+    x: 680,       // 가로 위치 (스테이지 불러올 때 시작 위치로 바뀜)
+    y: 430,       // 세로 위치
+    radius: 40,   // 크기(반지름)
+    speed: 5,     // 한 번에 움직이는 빠르기
+    roll: 0,      // 데굴데굴 구르는 각도
+    vy: 0,        // 위아래 속도 (점프/떨어짐)
+    squash: 1,    // 찌그러짐 정도 (1이면 동그람, 튈 때 살짝 변함)
+    onGround: false, // 지금 바닥이나 박스 위에 서 있는지
+  };
+
+  // ===== 바닥과 중력 설정 =====
+  const GROUND_Y = 540;      // 바닥 높이
+  const GRAVITY = 0.6;       // 중력 (아래로 당기는 힘)
+  const JUMP_POWER = -16;    // 스페이스바로 점프하는 힘 (위로! 그래서 마이너스)
+
+  // ===== 게임 상태 =====
+  let hasKey = false;    // 열쇠를 받았는지
+  let cleared = false;   // 지금 스테이지를 클리어했는지
+  let doorOpen = 0;      // 문 열림 정도 (0=닫힘, 1=활짝)
+  let hearts = 5;        // 목숨 (하트) 개수
+  let gameOver = false;  // 게임 오버 여부
+  let clearTimer = 0;    // 클리어 축하 화면을 보여주는 시간 (프레임)
+  let thanksTimer = 0;   // "감사합니다!" 말풍선을 보여주는 시간 (프레임)
+
+  // ===== 스테이지 =====
+  const TOTAL_STAGES = 10;   // 전체 스테이지 개수
+  let currentStage = 1;      // 지금 스테이지 (1~10)
+  let allClear = false;      // 모든 스테이지를 다 깼는지
+
+  // 스테이지마다 바뀌는 것들 (불러올 때 채워짐)
+  let boxes = [];
+  let stars = [];
+  let person = { x: 0, y: 0 };
+  let door = { x: 0, y: 0, w: 70, h: 90 };
+  let START_X = 0, START_Y = 0;
+
+  const BOX_COLORS = ["#ffd35c", "#8fd3ff", "#b6f28a", "#ffa3d1", "#c9a3ff"];
+
+  // ===== 스테이지 설계 (규칙 기반 랜덤 맵) =====
+  // 박스 크기는 모든 단계에서 똑같이 고정(일반 160, 맨 위 230)!
+  // 난이도는 두 가지로 조절: (1) 옆 박스로 옮기는 가로 거리, (2) 밟아야 하는 박스 개수.
+  // 그 규칙 안에서 매번 랜덤하게 맵을 만든다.
+  const BOX_W = 160;   // 일반 박스 고정 너비 (3단계 크기)
+  const TOP_W = 230;   // 맨 위 발판 고정 너비 (사람+문이 서야 해서 조금 넓음)
+  const BOTTOM_Y = 470; // 맨 아래(시작) 박스 윗면 높이
+  const TOP_Y = 110;    // 맨 위(사람/문) 박스 윗면 높이
+
+  // 스테이지별 "가로로 옮기는 거리 범위" [최소, 최대] — 단계가 오를수록 멀어진다.
+  function shiftFor(n) {
+    const t = (n - 1) / (TOTAL_STAGES - 1); // 0 ~ 1
+    const lo = 20 + t * 120;   // 20 → 140
+    const hi = 70 + t * 180;   // 70 → 250
+    return [lo, hi];
+  }
+
+  // 스테이지별 박스 개수 — 2단계마다 하나씩 늘어난다 (5 → 최대 9).
+  // 1~2단계: 5개, 3~4: 6개, 5~6: 7개, 7~8: 8개, 9~10: 9개
+  function boxCountFor(n) {
+    return Math.min(9, 5 + Math.floor((n - 1) / 2));
+  }
+
+  // 0~1 랜덤을 min~max로
+  function randRange(min, max) {
+    return min + Math.random() * (max - min);
+  }
+
+  // 스테이지 번호로 박스들의 [중심x, 윗면y, 너비] 만들기 (매번 랜덤)
+  function layoutFor(n) {
+    const [lo, hi] = shiftFor(n);
+    const count = boxCountFor(n);
+    // 박스가 많을수록 세로 간격을 좁혀서 화면 안에 다 들어가게 한다.
+    // (좁아도 위 박스에 안 막히도록 착지 로직에서 처리한다)
+    const spacing = (BOTTOM_Y - TOP_Y) / (count - 1);
+
+    const centers = [];
+    // 맨 아래 시작 박스: 가운데쯤에서 랜덤 (150~650)
+    let cx = randRange(150, 650);
+    centers.push(cx);
+
+    // 위로 갈수록 좌우로 지그재그 (방향을 번갈아 가며 랜덤 거리만큼 이동)
+    let dir = Math.random() < 0.5 ? 1 : -1;
+    for (let i = 1; i < count; i++) {
+      const shift = randRange(lo, hi);
+      const isTop = i === count - 1;
+      const minC = isTop ? 120 : 90;   // 화면 밖으로 안 나가게
+      const maxC = isTop ? 680 : 710;
+      let next = cx + dir * shift;
+      // 화면을 벗어나면 반대 방향으로 튼다
+      if (next < minC || next > maxC) {
+        dir = -dir;
+        next = cx + dir * shift;
+      }
+      next = Math.max(minC, Math.min(maxC, next));
+      centers.push(next);
+      cx = next;
+      dir = -dir; // 다음엔 반대 방향 (지그재그)
+    }
+
+    return centers.map((c, i) => {
+      const y = BOTTOM_Y - i * spacing;
+      return [c, y, i === count - 1 ? TOP_W : BOX_W];
+    });
+  }
+
+  // 스테이지 번호로 박스/별/사람/문/시작위치를 만든다 (박스 개수는 단계마다 다름)
+  function makeStage(n) {
+    const layout = layoutFor(n);
+    const last = layout.length - 1;
+    const h = 30;
+    const newBoxes = layout.map((b, i) => ({
+      x: b[0] - b[2] / 2, // 왼쪽 위 x (중심 - 너비/2)
+      y: b[1],
+      w: b[2],
+      h: h,
+      color: BOX_COLORS[i % BOX_COLORS.length], // 색은 돌려쓰기
+    }));
+
+    // 별 3개: 시작/맨위를 뺀 중간 박스들 중에서 골고루 3곳에 놓는다
+    const middle = [];
+    for (let i = 1; i < last; i++) middle.push(i);
+    const starIdx = pickSpread(middle, 3);
+    const newStars = starIdx.map((i) => ({
+      x: layout[i][0],       // 그 박스 중심 x
+      y: layout[i][1] - 55,  // 박스 윗면 살짝 위
+      got: false,
+      twinkle: 0,
+    }));
+
+    // 사람 + 문: 맨 위 넓은 박스(top) 위
+    const top = layout[last];
+    const topY = top[1]; // 맨 위 박스 윗면
+    const newPerson = { x: top[0] - 55, y: topY };          // 왼쪽에 사람
+    const newDoor = { x: top[0] + 10, y: topY - 90, w: 70, h: 90 }; // 오른쪽에 문
+
+    // 시작 위치: 맨 아래 박스(b0) 위
+    const startX = layout[0][0];
+    const startY = layout[0][1] - pongpong.radius;
+
+    return { boxes: newBoxes, stars: newStars, person: newPerson, door: newDoor, startX, startY };
+  }
+
+  // 배열에서 k개를 골고루 퍼뜨려 고르기 (별을 층층이 배치하려고)
+  function pickSpread(arr, k) {
+    if (arr.length <= k) return arr.slice();
+    const picked = [];
+    for (let j = 0; j < k; j++) {
+      const idx = Math.round((j * (arr.length - 1)) / (k - 1));
+      picked.push(arr[idx]);
+    }
+    return picked;
+  }
+
+  // 스테이지 불러오기
+  function loadStage(n) {
+    const s = makeStage(n);
+    boxes = s.boxes;
+    stars = s.stars;
+    person = s.person;
+    door = s.door;
+    START_X = s.startX;
+    START_Y = s.startY;
+    // 스테이지별 상태 초기화
+    hasKey = false;
+    doorOpen = 0;
+    cleared = false;
+    thanksTimer = 0;
+    hearts = 5; // 스테이지마다 하트 5개로 새로 채워줌 (아이가 하기 쉽게)
+    respawn();
+  }
+
+  // 다음 스테이지로
+  function nextStage() {
+    if (currentStage >= TOTAL_STAGES) {
+      allClear = true; // 마지막이면 전체 클리어
+      sfx.win();       // 최종 팡파레
+      // 색종이 팡팡 크게
+      spawnParticles(canvas.width / 2, canvas.height / 2 - 40, 60,
+        ["#ff5fa2", "#ffe74d", "#8fd3ff", "#b6f28a", "#c9a3ff", "#ffffff"]);
+      return;
+    }
+    currentStage += 1;
+    loadStage(currentStage);
+  }
+
+  // 퐁퐁이를 시작 위치로 되돌리기
+  function respawn() {
+    pongpong.x = START_X;
+    pongpong.y = START_Y;
+    pongpong.vy = 0;
+    pongpong.onGround = false;
+  }
+
+  // 떨어졌을 때: 하트 1개 줄이고, 남았으면 다시 시작 / 없으면 게임 오버
+  function loseHeart() {
+    hearts -= 1;
+    sfx.fall(); // 삐용 소리
+    if (hearts <= 0) {
+      hearts = 0;
+      gameOver = true;
+    } else {
+      respawn();
+    }
+  }
+
+  // 게임을 처음(스테이지 1)부터 다시 시작
+  function restartGame() {
+    currentStage = 1;
+    allClear = false;
+    gameOver = false;
+    loadStage(1);
+  }
+
+  // ===== 어느 쪽으로 갈까? =====
+  // -1 = 왼쪽, 0 = 안 움직임, 1 = 오른쪽
+  let moveDir = 0;
+
+  // 모은 별 개수 세기
+  function countStars() {
+    return stars.filter((s) => s.got).length;
+  }
+
+  // ===== 바닥(잔디) 그리기 =====
+  function drawGround() {
+    // 흙
+    ctx.fillStyle = "#c8874f";
+    ctx.fillRect(0, GROUND_Y, canvas.width, canvas.height - GROUND_Y);
+    // 잔디 (위쪽 초록 띠)
+    ctx.fillStyle = "#7ed957";
+    ctx.fillRect(0, GROUND_Y, canvas.width, 16);
+    ctx.fillStyle = "#5cba3a";
+    ctx.fillRect(0, GROUND_Y + 14, canvas.width, 4);
+  }
+
+  // ===== 박스 발판 그리기 =====
+  function drawBoxes() {
+    for (const box of boxes) {
+      // 박스 몸통
+      ctx.fillStyle = box.color;
+      roundRect(box.x, box.y, box.w, box.h, 10);
+      ctx.fill();
+      // 테두리
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = "rgba(0,0,0,0.15)";
+      roundRect(box.x, box.y, box.w, box.h, 10);
+      ctx.stroke();
+      // 윗면 반짝 (밝은 띠)
+      ctx.fillStyle = "rgba(255,255,255,0.4)";
+      roundRect(box.x + 8, box.y + 6, box.w - 16, 8, 4);
+      ctx.fill();
+    }
+  }
+
+  // 모서리 둥근 사각형 경로 만들기 (재사용)
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  // ===== 별들 그리기 =====
+  function drawStars() {
+    for (const star of stars) {
+      if (star.got) continue; // 먹은 별은 안 그린다
+      star.twinkle += 0.08;   // 반짝임 애니메이션
+      // 위아래로 살랑살랑 떠다니는 느낌
+      const floatY = star.y + Math.sin(star.twinkle) * 5;
+      // 크기도 살짝 커졌다 작아졌다 (반짝)
+      const size = 20 + Math.sin(star.twinkle * 2) * 2;
+
+      // 빛나는 후광
+      ctx.save();
+      ctx.shadowColor = "#fff17a";
+      ctx.shadowBlur = 18;
+      drawStar(star.x, floatY, size, "#ffe74d");
+      ctx.restore();
+    }
+  }
+
+  // ===== 스테이지 번호 + 모은 별 개수 표시 (왼쪽 위) =====
+  function drawCounter() {
+    const got = countStars();
+    const total = stars.length;
+    // 스테이지 번호
+    ctx.fillStyle = "#7a5a9a";
+    ctx.font = "bold 22px 'Comic Sans MS', sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.fillText(`${currentStage}단계 / ${TOTAL_STAGES}`, 26, 30);
+    // 작은 별 아이콘
+    drawStar(40, 62, 16, "#ffe74d");
+    // 별 개수 글자
+    ctx.fillStyle = "#ff5fa2";
+    ctx.font = "bold 28px 'Comic Sans MS', sans-serif";
+    ctx.fillText(`${got} / ${total}`, 64, 64);
+  }
+
+  // ===== 문 그리기 =====
+  function drawDoor() {
+    const d = door;
+    // 문틀 (갈색)
+    ctx.fillStyle = "#8b5a2b";
+    roundRect(d.x - 6, d.y - 6, d.w + 12, d.h + 6, 8);
+    ctx.fill();
+    // 문 안쪽 (열린 만큼 어두운 통로가 보인다)
+    ctx.fillStyle = "#3a2a4a";
+    ctx.fillRect(d.x, d.y, d.w, d.h);
+    // 문짝 (열린 만큼 왼쪽으로 접혀 들어감)
+    const doorW = d.w * (1 - doorOpen); // 열릴수록 좁아짐
+    if (doorW > 0) {
+      ctx.fillStyle = "#c06f3a";
+      ctx.fillRect(d.x, d.y, doorW, d.h);
+      // 문 손잡이
+      ctx.fillStyle = "#ffe74d";
+      ctx.beginPath();
+      ctx.arc(d.x + doorW - 10, d.y + d.h / 2, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // ===== 사람 그리기 =====
+  function drawPerson() {
+    const px = person.x;
+    const feetY = person.y;   // 발이 박스 윗면에 닿음
+    // 다리
+    ctx.strokeStyle = "#3a5a8a";
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.moveTo(px - 6, feetY); ctx.lineTo(px - 6, feetY - 22);
+    ctx.moveTo(px + 6, feetY); ctx.lineTo(px + 6, feetY - 22);
+    ctx.stroke();
+    // 몸통
+    ctx.fillStyle = "#4caf50";
+    roundRect(px - 14, feetY - 52, 28, 32, 8);
+    ctx.fill();
+    // 머리
+    ctx.fillStyle = "#ffcc99";
+    ctx.beginPath();
+    ctx.arc(px, feetY - 62, 13, 0, Math.PI * 2);
+    ctx.fill();
+    // 눈
+    ctx.fillStyle = "#3a2a2a";
+    ctx.beginPath();
+    ctx.arc(px - 4, feetY - 63, 2, 0, Math.PI * 2);
+    ctx.arc(px + 4, feetY - 63, 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 열쇠를 아직 안 줬으면 손에 열쇠를 들고 있다
+    if (!hasKey) {
+      drawKey(px + 22, feetY - 40, 1);
+      // 말풍선 (별을 다 모았는지에 따라 다른 말)
+      const msg = countStars() === stars.length ? "이리 와!" : "별 모아와~";
+      drawBubble(px, feetY - 90, msg);
+    } else {
+      // 팔을 흔드는 느낌 (열쇠는 이제 퐁퐁이에게)
+      drawBubble(px, feetY - 90, "잘했어!");
+    }
+  }
+
+  // ===== 열쇠 그리기 =====
+  function drawKey(cx, cy, scale) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(scale, scale);
+    ctx.fillStyle = "#ffcf33";
+    ctx.strokeStyle = "#e0a800";
+    ctx.lineWidth = 2;
+    // 열쇠 고리
+    ctx.beginPath();
+    ctx.arc(0, -6, 7, 0, Math.PI * 2);
+    ctx.fill(); ctx.stroke();
+    // 열쇠 대
+    ctx.fillRect(-2, 0, 4, 18);
+    // 열쇠 이빨
+    ctx.fillRect(2, 12, 6, 3);
+    ctx.fillRect(2, 17, 5, 3);
+    ctx.restore();
+  }
+
+  // ===== 말풍선 그리기 =====
+  function drawBubble(cx, cy, text) {
+    ctx.font = "bold 16px 'Comic Sans MS', sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    const w = ctx.measureText(text).width + 24;
+    const h = 30;
+    ctx.fillStyle = "rgba(255,255,255,0.95)";
+    ctx.strokeStyle = "#ff9ac9";
+    ctx.lineWidth = 3;
+    roundRect(cx - w / 2, cy - h / 2, w, h, 12);
+    ctx.fill(); ctx.stroke();
+    // 꼬리
+    ctx.beginPath();
+    ctx.moveTo(cx - 6, cy + h / 2 - 2);
+    ctx.lineTo(cx, cy + h / 2 + 10);
+    ctx.lineTo(cx + 6, cy + h / 2 - 2);
+    ctx.fillStyle = "rgba(255,255,255,0.95)";
+    ctx.fill();
+    // 글자
+    ctx.fillStyle = "#ff5fa2";
+    ctx.fillText(text, cx, cy);
+    ctx.textAlign = "left"; // 기본값 복구
+  }
+
+  // ===== 클리어 화면 =====
+  function drawClear() {
+    ctx.fillStyle = "rgba(255, 240, 250, 0.85)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#ff5fa2";
+    ctx.font = "bold 56px 'Comic Sans MS', sans-serif";
+    ctx.fillText(`${currentStage}단계 클리어! 🎉`, canvas.width / 2, canvas.height / 2 - 20);
+    ctx.fillStyle = "#7a5a9a";
+    ctx.font = "bold 24px 'Comic Sans MS', sans-serif";
+    const nextMsg = currentStage < TOTAL_STAGES ? "다음 단계로 갈게요!" : "마지막 단계예요!";
+    ctx.fillText(nextMsg, canvas.width / 2, canvas.height / 2 + 40);
+    // 축하 별들
+    drawStar(canvas.width / 2 - 190, canvas.height / 2 - 20, 22, "#ffe74d");
+    drawStar(canvas.width / 2 + 190, canvas.height / 2 - 20, 22, "#ffe74d");
+    ctx.textAlign = "left";
+  }
+
+  // ===== 모든 스테이지 클리어 (최종 축하) 화면 =====
+  function drawAllClear() {
+    // 무지개빛 배경
+    ctx.fillStyle = "rgba(255, 250, 235, 0.9)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#ff5fa2";
+    ctx.font = "bold 58px 'Comic Sans MS', sans-serif";
+    ctx.fillText("🏆 모두 클리어! 🏆", canvas.width / 2, canvas.height / 2 - 50);
+    ctx.fillStyle = "#7a5a9a";
+    ctx.font = "bold 28px 'Comic Sans MS', sans-serif";
+    ctx.fillText(`퐁퐁이가 ${TOTAL_STAGES}단계를 다 깼어요! 대단해요!`, canvas.width / 2, canvas.height / 2 + 10);
+    // 다시 하기 버튼
+    ctx.fillStyle = "#ff5fa2";
+    roundRect(canvas.width / 2 - 110, canvas.height / 2 + 50, 220, 60, 16);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 26px 'Comic Sans MS', sans-serif";
+    ctx.fillText("다시 하기 🔄", canvas.width / 2, canvas.height / 2 + 80);
+    // 축하 별들 여기저기
+    drawStar(120, 120, 20, "#ffe74d");
+    drawStar(680, 130, 24, "#ffe74d");
+    drawStar(150, 460, 18, "#ffe74d");
+    drawStar(650, 470, 22, "#ffe74d");
+    ctx.textAlign = "left";
+  }
+
+  // ===== 퐁퐁이가 열쇠를 들고 있으면 표시 =====
+  function drawPongpongKey() {
+    if (hasKey && !cleared) {
+      drawKey(pongpong.x + pongpong.radius - 6, pongpong.y, 1.1);
+    }
+  }
+
+  // ===== 하트(목숨) 그리기 (오른쪽 위) =====
+  function drawHearts() {
+    const total = 5;
+    const size = 16;
+    const gap = 36;
+    const startX = canvas.width - 40 - (total - 1) * gap;
+    for (let i = 0; i < total; i++) {
+      const filled = i < hearts;         // 남은 하트는 빨강, 쓴 하트는 회색
+      drawHeart(startX + i * gap, 40, size, filled ? "#ff5b7f" : "#d9d9d9");
+    }
+  }
+
+  // 하트 한 개 그리기
+  function drawHeart(cx, cy, size, color) {
+    ctx.save();
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy + size * 0.4);
+    ctx.bezierCurveTo(cx, cy, cx - size, cy - size * 0.3, cx - size, cy - size * 0.6);
+    ctx.bezierCurveTo(cx - size, cy - size * 1.2, cx, cy - size * 1.1, cx, cy - size * 0.5);
+    ctx.bezierCurveTo(cx, cy - size * 1.1, cx + size, cy - size * 1.2, cx + size, cy - size * 0.6);
+    ctx.bezierCurveTo(cx + size, cy - size * 0.3, cx, cy, cx, cy + size * 0.4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,0.15)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // ===== 소리 켬/끔 버튼 (오른쪽 아래) =====
+  const soundBtn = { x: 742, y: 66, w: 44, h: 38 };
+  function drawSoundButton() {
+    const b = soundBtn;
+    ctx.fillStyle = "rgba(255,255,255,0.7)";
+    roundRect(b.x, b.y, b.w, b.h, 10);
+    ctx.fill();
+    ctx.font = "24px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(soundOn ? "🔊" : "🔇", b.x + b.w / 2, b.y + b.h / 2 + 1);
+    ctx.textAlign = "left";
+  }
+
+  // ===== 게임 오버 화면 =====
+  function drawGameOver() {
+    ctx.fillStyle = "rgba(60, 40, 60, 0.8)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#ffd3e6";
+    ctx.font = "bold 56px 'Comic Sans MS', sans-serif";
+    ctx.fillText("게임 오버 😢", canvas.width / 2, canvas.height / 2 - 40);
+    // 다시 하기 버튼
+    ctx.fillStyle = "#ff5fa2";
+    roundRect(canvas.width / 2 - 110, canvas.height / 2 + 20, 220, 64, 16);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 28px 'Comic Sans MS', sans-serif";
+    ctx.fillText("다시 하기 🔄", canvas.width / 2, canvas.height / 2 + 52);
+    ctx.textAlign = "left";
+  }
+
+  // 다시 하기 버튼 영역 (클릭 판정용)
+  const restartBtn = { x: 400 - 110, y: 300 + 20, w: 220, h: 64 };
+
+  // ===== 퐁퐁이 그리기 (커비 스타일) =====
+  function drawPongpong() {
+    const px = pongpong.x;
+    const py = pongpong.y;
+    const r = pongpong.radius;
+    const facing = moveDir >= 0 ? 1 : -1; // 바라보는 방향 (오른쪽 1, 왼쪽 -1)
+    const inAir = !pongpong.onGround;     // 공중에 떠 있는지 (점프/낙하 중)
+
+    // ----- 발 (빨간 타원 두 개) -----
+    // 커비의 상징! 몸통 아래 양쪽에 붙어 있다.
+    // 공중에 있으면 발이 아래로 살짝 모이고, 땅에선 양옆으로 벌어진다.
+    const footY = py + r - 4;
+    const footSpread = inAir ? 16 : 24;   // 발 사이 간격
+    const footW = 18, footH = 11;
+    drawFoot(px - footSpread, footY + (inAir ? 4 : 0), footW, footH, -0.2);
+    drawFoot(px + footSpread, footY + (inAir ? 4 : 0), footW, footH, 0.2);
+
+    // ----- 팔 (작고 짧은 팔 두 개) -----
+    // 몸통 옆에 붙은 짧은 팔. 점프 중엔 위로 살짝 든다.
+    const armY = inAir ? py - 6 : py + 4;
+    drawArm(px - r + 4, armY, -1, inAir);  // 왼팔
+    drawArm(px + r - 4, armY, 1, inAir);   // 오른팔
+
+    // ----- 몸통 (핑크 동그라미, 찌그러짐 적용) -----
+    const sx = 2 - pongpong.squash; // 가로 스케일
+    const sy = pongpong.squash;     // 세로 스케일
+    ctx.save();
+    ctx.translate(px, py + r);      // 발 기준으로 찌그러짐
+    ctx.scale(sx, sy);
+    ctx.translate(-px, -(py + r));
+
+    // 몸통
+    ctx.beginPath();
+    ctx.arc(px, py, r, 0, Math.PI * 2);
+    ctx.fillStyle = "#ff9dd0";
+    ctx.fill();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = "#e86ba8";
+    ctx.stroke();
+
+    // 몸통 위쪽 밝은 하이라이트 (반질반질한 느낌)
+    ctx.beginPath();
+    ctx.ellipse(px - r * 0.35, py - r * 0.4, r * 0.32, r * 0.2, -0.6, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(255,255,255,0.5)";
+    ctx.fill();
+
+    // ----- 얼굴 (바라보는 방향으로 살짝 치우침) -----
+    const fx = px + facing * 6; // 얼굴 중심 (방향 쪽으로)
+
+    // 볼터치 (분홍 볼)
+    ctx.fillStyle = "#ff6fb0";
+    ctx.beginPath();
+    ctx.ellipse(fx - 15, py + 10, 8, 5, 0, 0, Math.PI * 2);
+    ctx.ellipse(fx + 15, py + 10, 8, 5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 눈 (커비 특유의 크고 길쭉한 세로 타원)
+    ctx.fillStyle = "#2a2a3a";
+    ctx.beginPath();
+    ctx.ellipse(fx - 9, py - 6, 5, 12, 0, 0, Math.PI * 2);
+    ctx.ellipse(fx + 9, py - 6, 5, 12, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 눈 아래쪽 파란빛 (커비 눈 특징)
+    ctx.fillStyle = "#4a7dff";
+    ctx.beginPath();
+    ctx.ellipse(fx - 9, py + 1, 3.5, 4, 0, 0, Math.PI * 2);
+    ctx.ellipse(fx + 9, py + 1, 3.5, 4, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 눈 반짝임 (하얀 점, 위쪽)
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.ellipse(fx - 10, py - 11, 2, 3.5, 0, 0, Math.PI * 2);
+    ctx.ellipse(fx + 8, py - 11, 2, 3.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 입 (작은 미소)
+    ctx.strokeStyle = "#c23a6a";
+    ctx.lineWidth = 3;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.arc(fx, py + 14, 6, 0.15 * Math.PI, 0.85 * Math.PI);
+    ctx.stroke();
+    ctx.restore();
+
+    // ----- 별 표시 (머리 위 반짝 별, 데굴데굴) -----
+    ctx.save();
+    ctx.translate(px, py - r - 18);
+    ctx.rotate(pongpong.roll);
+    drawStar(0, 0, 11, "#fff45f");
+    ctx.restore();
+  }
+
+  // ===== 발 한 개 그리기 (빨간 타원) =====
+  function drawFoot(cx, cy, w, h, tilt) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(tilt);
+    ctx.beginPath();
+    ctx.ellipse(0, 0, w, h, 0, 0, Math.PI * 2);
+    ctx.fillStyle = "#e0416a";     // 커비 발 색 (자주빛 빨강)
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "#b52a50";
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // ===== 팔 한 개 그리기 (짧고 둥근 팔) =====
+  function drawArm(cx, cy, side, up) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    // 점프 중이면 팔을 위로, 아니면 옆으로
+    ctx.rotate(side * (up ? -0.9 : -0.2));
+    ctx.beginPath();
+    ctx.ellipse(side * 8, 0, 11, 8, 0, 0, Math.PI * 2);
+    ctx.fillStyle = "#ff9dd0";
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "#e86ba8";
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // ===== 별 그리기 (재사용할 함수) =====
+  function drawStar(cx, cy, size, color) {
+    ctx.save();
+    ctx.beginPath();
+    for (let i = 0; i < 5; i++) {
+      const angle = (Math.PI / 2.5) * i - Math.PI / 2;
+      const x = cx + Math.cos(angle) * size;
+      const y = cy + Math.sin(angle) * size;
+      ctx.lineTo(x, y);
+      const innerAngle = angle + Math.PI / 5;
+      const ix = cx + Math.cos(innerAngle) * (size / 2.3);
+      const iy = cy + Math.sin(innerAngle) * (size / 2.3);
+      ctx.lineTo(ix, iy);
+    }
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = "#f0b400";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // ===== 퐁퐁이 움직이기 =====
+  function updatePongpong() {
+    // ----- 좌우 이동 -----
+    // 누른 방향으로 이동
+    pongpong.x += moveDir * pongpong.speed;
+
+    // 움직이면 데굴데굴 구른다 (별이 도는 효과)
+    pongpong.roll += moveDir * 0.12;
+
+    // 화면 밖으로 나가지 않게 막기
+    const left = pongpong.radius;
+    const right = canvas.width - pongpong.radius;
+    if (pongpong.x < left) pongpong.x = left;
+    if (pongpong.x > right) pongpong.x = right;
+
+    // ----- 위아래 (중력 + 점프) -----
+    const prevBottom = pongpong.y + pongpong.radius; // 움직이기 전 발 위치
+
+    // 중력으로 아래로 점점 빨라지며 떨어진다
+    pongpong.vy += GRAVITY;
+    pongpong.y += pongpong.vy;
+
+    const newBottom = pongpong.y + pongpong.radius;  // 움직인 후 발 위치
+
+    // 이번 프레임에 어딘가 위에 서 있게 됐는지
+    let landed = false;
+
+    // 떨어지는 중일 때만(위로 올라갈 때는 통과) 박스를 밟는지 확인한다
+    if (pongpong.vy > 0) {
+      for (const box of boxes) {
+        const onTopX = pongpong.x > box.x && pongpong.x < box.x + box.w; // 박스 가로 범위 안
+        const crossedTop = prevBottom <= box.y && newBottom >= box.y;    // 발이 박스 윗면을 지나감
+        if (onTopX && crossedTop) {
+          pongpong.y = box.y - pongpong.radius; // 박스 위에 딱 맞추고
+          pongpong.vy = 0;                      // 그 위에 선다 (더 안 떨어짐)
+          landed = true;
+          break;
+        }
+      }
+    }
+
+    // 바닥(잔디)에 닿으면 = 떨어진 것! 하트 감소 후 다시 시작
+    const bottom = GROUND_Y - pongpong.radius;
+    if (pongpong.y >= bottom) {
+      loseHeart();
+      return; // 이번 프레임은 여기서 끝 (다시 시작 위치로 돌아감)
+    }
+
+    // 방금 착지했으면 살짝 납작 (뿅! 효과)
+    if (landed && !pongpong.onGround) {
+      pongpong.squash = 0.7;
+    }
+    pongpong.onGround = landed;
+
+    // 찌그러진 몸이 서서히 원래 동그란 모양으로 돌아온다
+    pongpong.squash += (1 - pongpong.squash) * 0.15;
+
+    // ----- 별 먹기 -----
+    for (const star of stars) {
+      if (star.got) continue;
+      // 퐁퐁이 중심과 별 사이 거리가 가까우면 먹은 것으로 처리
+      const dx = pongpong.x - star.x;
+      const dy = pongpong.y - star.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < pongpong.radius + 18) {
+        star.got = true; // 냠! 먹었다
+        sfx.star();      // 반짝 소리
+        spawnParticles(star.x, star.y, 12, ["#ffe74d", "#fff17a", "#ffffff"]); // 반짝이 튀기기
+      }
+    }
+
+    // ----- 사람에게 가서 열쇠 받기 -----
+    // 별 3개를 다 모으고 "맨 위 박스 위에 올라오면" 열쇠를 준다.
+    // (거리 판정은 문 쪽에 서면 못 받는 버그가 있어서, 맨 위 발판 위이기만 하면 주도록 바꿈)
+    if (!hasKey && countStars() === stars.length) {
+      const topBox = boxes[boxes.length - 1]; // 맨 위 발판
+      const onTopBox =
+        pongpong.x > topBox.x &&
+        pongpong.x < topBox.x + topBox.w &&
+        Math.abs((pongpong.y + pongpong.radius) - topBox.y) < 12; // 그 박스 위에 서 있음
+      if (onTopBox) {
+        hasKey = true;      // 열쇠 받음!
+        sfx.key();          // 열쇠 상승음
+        speak("감사합니다"); // 퐁퐁이가 감사 인사 (음성)
+        thanksTimer = 100;  // "감사합니다!" 말풍선 표시 시간
+        spawnParticles(person.x, person.y - 40, 16, ["#ffcf33", "#fff17a", "#ffffff"]);
+      }
+    }
+
+    // ----- 열쇠를 받으면 문이 스르륵 열린다 -----
+    if (hasKey && doorOpen < 1) {
+      doorOpen += 0.03;
+      if (doorOpen >= 1) {
+        doorOpen = 1;
+        if (!cleared) {
+          cleared = true;      // 문이 다 열리면 스테이지 클리어!
+          clearTimer = 120;    // 약 2초간 축하 화면
+          sfx.clear();         // 딩동댕
+          // 색종이(반짝이) 팡팡
+          spawnParticles(canvas.width / 2, canvas.height / 2, 40,
+            ["#ff5fa2", "#ffe74d", "#8fd3ff", "#b6f28a", "#c9a3ff"]);
+        }
+      }
+    }
+  }
+
+  // ===== 키보드 조작 =====
+  // 어떤 방향키를 누르고 있는지 기억
+  let leftHeld = false;
+  let rightHeld = false;
+
+  function jump() {
+    // 바닥이나 박스 위에 서 있을 때만 점프 가능
+    if (pongpong.onGround) {
+      pongpong.vy = JUMP_POWER;
+      pongpong.squash = 1.3; // 점프 시작할 때 위로 길쭉 (뿅!)
+      pongpong.onGround = false;
+      sfx.jump();            // 뿅 소리
+    }
+  }
+
+  document.addEventListener("keydown", (e) => {
+    ensureAudio(); // 첫 키 입력에 소리 준비
+    if (e.key === "ArrowLeft")  { leftHeld = true;  e.preventDefault(); }
+    if (e.key === "ArrowRight") { rightHeld = true; e.preventDefault(); }
+    if (e.key === " " || e.key === "Spacebar") { jump(); e.preventDefault(); }
+  });
+
+  document.addEventListener("keyup", (e) => {
+    if (e.key === "ArrowLeft")  leftHeld = false;
+    if (e.key === "ArrowRight") rightHeld = false;
+  });
+
+  // 누르고 있는 방향키로 이동 방향 정하기 (매 프레임 갱신)
+  function updateMoveDir() {
+    moveDir = 0;
+    if (leftHeld || touchLeft)   moveDir -= 1;
+    if (rightHeld || touchRight) moveDir += 1;
+  }
+
+  // ===== 터치(아이패드/폰) 조작 =====
+  // 화면 아래에 큰 버튼 3개: ◀ 왼쪽 / ▶ 오른쪽 / 점프
+  let touchLeft = false, touchRight = false;
+  const BTN = {
+    left:  { x: 20,  y: 470, w: 110, h: 110 },
+    right: { x: 150, y: 470, w: 110, h: 110 },
+    jump:  { x: 570, y: 470, w: 210, h: 110 },
+  };
+
+  // 캔버스 화면 좌표 → 게임 내부 좌표로 변환 (아이패드에서 화면이 축소돼도 정확히)
+  function toCanvasXY(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (clientX - rect.left) * (canvas.width / rect.width),
+      y: (clientY - rect.top) * (canvas.height / rect.height),
+    };
+  }
+  function inBtn(p, b) {
+    return p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h;
+  }
+
+  // 지금 눌린 터치들을 보고 좌/우/점프 상태를 다시 계산
+  function applyTouches(touchList) {
+    touchLeft = false; touchRight = false;
+    let wantJump = false;
+    for (const t of touchList) {
+      const p = toCanvasXY(t.clientX, t.clientY);
+      if (inBtn(p, BTN.left))  touchLeft = true;
+      if (inBtn(p, BTN.right)) touchRight = true;
+      if (inBtn(p, BTN.jump))  wantJump = true;
+    }
+    return wantJump;
+  }
+
+  let jumpHeld = false; // 점프 버튼을 누르고 있는 동안 중복 점프 방지
+  function handleTouch(e) {
+    ensureAudio();
+    // 화면 스크롤/확대 막기 (게임에 집중)
+    e.preventDefault();
+    const wantJump = applyTouches(e.touches);
+    if (wantJump && !jumpHeld) { jump(); jumpHeld = true; }
+    if (!wantJump) jumpHeld = false;
+
+    // 게임오버/전체클리어 화면에서 아무 데나 탭하면 다시 시작
+    if ((gameOver || allClear) && e.touches.length > 0) {
+      const p = toCanvasXY(e.touches[0].clientX, e.touches[0].clientY);
+      if (p.y < 430) restartGame(); // 버튼 영역 위쪽을 탭하면
+    }
+  }
+  canvas.addEventListener("touchstart", handleTouch, { passive: false });
+  canvas.addEventListener("touchmove",  handleTouch, { passive: false });
+  canvas.addEventListener("touchend",   handleTouch, { passive: false });
+  canvas.addEventListener("touchcancel", handleTouch, { passive: false });
+
+  // ===== 터치 버튼 그리기 (모바일에서만 보이게) =====
+  // 터치 기기인지 감지 (주소 끝에 ?touch=1 을 붙이면 강제로 켤 수도 있음)
+  const forceTouch = /[?&]touch=1/.test(location.search);
+  const isTouch = forceTouch || ("ontouchstart" in window) || navigator.maxTouchPoints > 0;
+  function drawTouchButtons() {
+    if (!isTouch) return; // PC에선 키보드 쓰니까 안 그림
+    drawPadButton(BTN.left,  "◀", touchLeft);
+    drawPadButton(BTN.right, "▶", touchRight);
+    drawPadButton(BTN.jump,  "점프", jumpHeld);
+  }
+  function drawPadButton(b, label, pressed) {
+    ctx.save();
+    ctx.globalAlpha = pressed ? 0.85 : 0.5;
+    ctx.fillStyle = "#ffffff";
+    roundRect(b.x, b.y, b.w, b.h, 22);
+    ctx.fill();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = "#ff9ac9";
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = "#ff5fa2";
+    ctx.font = "bold 44px 'Comic Sans MS', sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, b.x + b.w / 2, b.y + b.h / 2 + 2);
+    ctx.textAlign = "left";
+    ctx.restore();
+  }
+
+  // 버튼 클릭 처리 (소리 버튼은 항상, 다시 하기는 게임오버/전체클리어일 때)
+  canvas.addEventListener("click", (e) => {
+    ensureAudio();
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    // 소리 켬/끔 버튼
+    const sb = soundBtn;
+    if (x >= sb.x && x <= sb.x + sb.w && y >= sb.y && y <= sb.y + sb.h) {
+      soundOn = !soundOn;
+      if (soundOn) sfx.star(); // 켤 때 살짝 소리
+      return;
+    }
+
+    if (!gameOver && !allClear) return;
+    // 두 화면의 "다시 하기" 버튼을 넉넉히 포함하는 영역 (가운데 아래쪽)
+    if (x >= 290 && x <= 510 && y >= 315 && y <= 415) {
+      restartGame();
+    }
+  });
+  // 스페이스바로도 다시 시작 (게임 오버 / 전체 클리어 상태일 때)
+  document.addEventListener("keydown", (e) => {
+    if ((gameOver || allClear) && (e.key === " " || e.key === "Spacebar")) {
+      restartGame();
+    }
+  });
+
+  // ===== 매 순간 화면 다시 그리기 =====
+  function draw() {
+    // 화면 지우기
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // 바닥 그리기
+    drawGround();
+    // 박스 발판 그리기
+    drawBoxes();
+    // 문 그리기 (사람보다 뒤에)
+    drawDoor();
+    // 사람 그리기
+    drawPerson();
+    // 별 그리기
+    drawStars();
+
+    // 클리어/게임오버/전체클리어가 아니면 계속 움직인다
+    if (!cleared && !gameOver && !allClear) {
+      updateMoveDir();   // 누른 방향키 반영
+      updatePongpong();  // 퐁퐁이 움직이기
+    }
+
+    // 게임오버/전체클리어가 아닐 때만 퐁퐁이를 그린다
+    if (!gameOver && !allClear) {
+      drawPongpong();
+      drawPongpongKey(); // 열쇠 들고 있으면 표시
+      // "감사합니다!" 말풍선 (열쇠 받은 직후)
+      if (thanksTimer > 0) {
+        drawBubble(pongpong.x, pongpong.y - pongpong.radius - 40, "감사합니다!");
+        thanksTimer -= 1;
+      }
+    }
+    // 스테이지 번호 + 별 개수 표시
+    drawCounter();
+    // 하트(목숨) 표시
+    drawHearts();
+
+    // 스테이지 클리어 → 잠깐 축하 화면 보여주고 다음 스테이지로
+    if (cleared && !allClear) {
+      drawClear();
+      clearTimer -= 1;
+      if (clearTimer <= 0) {
+        nextStage(); // 다음 스테이지 (또는 전체 클리어)
+      }
+    }
+    // 모든 스테이지를 다 깼으면 최종 축하 화면
+    if (allClear) drawAllClear();
+    // 게임오버면 게임오버 화면
+    if (gameOver) drawGameOver();
+
+    // 반짝이/색종이 파티클 (맨 위에 그려서 축하 화면 위로도 보인다)
+    updateAndDrawParticles();
+    // 소리 켬/끔 버튼
+    drawSoundButton();
+    // 터치 조작 버튼 (아이패드/폰에서만)
+    drawTouchButtons();
+
+    // 다음 그림 예약 (계속 반복)
+    requestAnimationFrame(draw);
+  }
+
+  // 게임 시작! 스테이지 1 불러오고 그리기 시작
+  loadStage(1);
+  draw();
+</script>
+
+</body>
+</html>
